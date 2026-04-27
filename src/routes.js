@@ -434,6 +434,110 @@ export function createRouter() {
     });
   });
 
+  // =================== tavily-key-generator 兼容接口 ===================
+  // GET /messages?address=xxx@example.com
+  // Authorization: Bearer <JWT_TOKEN>
+  router.get('/messages', async (context) => {
+    const { request, env } = context;
+    const url = new URL(request.url);
+
+    const address = extractEmail(
+      url.searchParams.get('address') ||
+      url.searchParams.get('mailbox') ||
+      ''
+    ).toLowerCase();
+
+    const limitRaw = parseInt(url.searchParams.get('limit') || '20', 10);
+    const limit = Number.isFinite(limitRaw)
+      ? Math.max(1, Math.min(limitRaw, 50))
+      : 20;
+
+    if (!address || !address.includes('@')) {
+      return Response.json({ messages: [] });
+    }
+
+    let DB;
+    try {
+      DB = await getDatabaseWithValidation(env);
+    } catch (error) {
+      console.error('tavily messages: 数据库连接失败:', error.message);
+      return Response.json({ messages: [] }, { status: 500 });
+    }
+
+    try {
+      const mailboxResult = await DB.prepare(
+        'SELECT id FROM mailboxes WHERE address = ? LIMIT 1'
+      ).bind(address).all();
+
+      const mailboxId = mailboxResult?.results?.[0]?.id;
+      if (!mailboxId) {
+        return Response.json({ messages: [] });
+      }
+
+      const result = await DB.prepare(`
+        SELECT
+          id,
+          sender,
+          subject,
+          verification_code,
+          preview,
+          r2_object_key,
+          received_at
+        FROM messages
+        WHERE mailbox_id = ?
+        ORDER BY received_at DESC, id DESC
+        LIMIT ?
+      `).bind(mailboxId, limit).all();
+
+      const rows = result?.results || [];
+      const messages = [];
+
+      for (const row of rows) {
+        let text = '';
+        let html = '';
+
+        // 优先从 R2 读取完整 EML，再用项目已有 parser 解析 text/html。
+        if (row.r2_object_key && env.MAIL_EML) {
+          try {
+            const obj = await env.MAIL_EML.get(row.r2_object_key);
+            if (obj) {
+              const raw = await obj.text();
+              const parsed = parseEmailBody(raw || '');
+              text = parsed.text || '';
+              html = parsed.html || '';
+            }
+          } catch (e) {
+            console.error('tavily messages: 读取/解析 R2 EML 失败:', e);
+          }
+        }
+
+        // 兜底：至少让验证码、摘要能被 tavily-key-generator 扫到。
+        if (!text) {
+          text = [
+            row.verification_code || '',
+            row.preview || ''
+          ].filter(Boolean).join('\n');
+        }
+
+        messages.push({
+          id: String(row.id),
+          msgid: String(row.id),
+          from: row.sender || '',
+          message_from: row.sender || '',
+          subject: row.subject || '',
+          text,
+          html,
+          received_at: row.received_at || ''
+        });
+      }
+
+      return Response.json({ messages });
+    } catch (error) {
+      console.error('tavily messages: 查询失败:', error);
+      return Response.json({ messages: [] }, { status: 500 });
+    }
+  });
+  
   // =================== API路由委托 ===================
   router.get('/api/*', async (context) => {
     return await delegateApiRequest(context);
