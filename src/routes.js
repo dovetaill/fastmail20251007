@@ -2,6 +2,7 @@ import { handleApiRequest, handleEmailReceive } from './apiHandlers.js';
 import { createJwt, verifyJwt, buildSessionCookie, verifyMailboxLogin } from './authentication.js';
 import { extractEmail } from './commonUtils.js';
 import { getDatabaseWithValidation } from './dbConnectionHelper.js';
+import { parseEmailBody } from './emailParser.js';
 
 /**
  * 路由处理器类，用于管理所有API路由
